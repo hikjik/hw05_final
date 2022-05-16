@@ -8,8 +8,9 @@ from django.core.cache import cache
 from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 from django import forms
+from http import HTTPStatus
 
-from ..models import Post, Group
+from ..models import Follow, Post, Group
 from ..views import POSTS_PER_PAGE
 
 TEMP_MEDIA_ROOT = tempfile.mkdtemp(dir=settings.BASE_DIR)
@@ -63,6 +64,8 @@ class PostViewTests(TestCase):
         shutil.rmtree(TEMP_MEDIA_ROOT, ignore_errors=True)
 
     def setUp(self):
+        self.guest_client = Client()
+
         self.auth_client = Client()
         self.auth_client.force_login(PostViewTests.user)
 
@@ -277,18 +280,10 @@ class PostViewTests(TestCase):
         user = PostViewTests.user
         group = PostViewTests.group
 
-        form_data = {
-            "text": "some text",
-            "group": group.id,
-        }
-        response = self.auth_client.post(
-            reverse("posts:post_create"),
-            data=form_data,
-            follow=True,
-        )
-        self.assertRedirects(
-            response,
-            reverse("posts:profile", kwargs={"username": user.username}),
+        new_post = Post.objects.create(
+            author=user,
+            group=group,
+            text="some text",
         )
 
         paths = [
@@ -299,8 +294,55 @@ class PostViewTests(TestCase):
         for path in paths:
             response = self.auth_client.get(path)
             post = response.context["page_obj"][0]
-            self.assertEqual(post.text, form_data["text"])
-            self.assertEqual(post.group.id, form_data["group"])
+            self.assertEqual(post.id, new_post.id)
+            self.assertEqual(post.text, new_post.text)
+            self.assertEqual(post.group.slug, new_post.group.slug)
+
+    def test_create_post_successful_auth_user(self):
+        group = PostViewTests.group
+
+        form_data = {
+            "text": "auth user create post",
+            "group": group.id,
+        }
+
+        response = self.auth_client.post(
+            reverse("posts:post_create"),
+            data=form_data,
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, HTTPStatus.OK)
+        self.assertTrue(
+            Post.objects.filter(
+                text=form_data["text"],
+                group=group,
+            ).exists()
+        )
+
+    def test_create_post_redirect_anonymous(self):
+        path = reverse("posts:post_create")
+        group = PostViewTests.group
+        form_data = {
+            "text": "auth user create post",
+            "group": group.id,
+        }
+
+        response = self.guest_client.post(
+            path=path,
+            data=form_data,
+            follow=True,
+        )
+        self.assertRedirects(
+            response,
+            reverse("users:login") + "?next=" + path,
+        )
+        self.assertFalse(
+            Post.objects.filter(
+                text=form_data["text"],
+                group=group,
+            ).exists()
+        )
 
     def test_add_comment_appears_on_post_profile_page(self):
         post = list(PostViewTests.posts.values())[0]
@@ -324,27 +366,16 @@ class PostViewTests(TestCase):
         self.assertEqual(comments[0].post.id, post.id)
 
     def test_created_post_not_appears_on_another_group_page(self):
+        user = PostViewTests.user
         new_group = Group.objects.create(
             title="another title",
             slug="another_slug",
             description="another description",
         )
-
-        form_data = {
-            "text": "some new text",
-            "group": new_group.id,
-        }
-        response = self.auth_client.post(
-            reverse("posts:post_create"),
-            data=form_data,
-            follow=True,
-        )
-        self.assertRedirects(
-            response,
-            reverse(
-                "posts:profile",
-                kwargs={"username": PostViewTests.user.username},
-            ),
+        new_post = Post.objects.create(
+            author=user,
+            group=new_group,
+            text="some new text",
         )
 
         path = reverse(
@@ -354,6 +385,7 @@ class PostViewTests(TestCase):
         for page in range(1, 3):
             response = self.auth_client.get(path + f"?page={page}")
             for post in response.context["page_obj"]:
+                self.assertNotEqual(post.id, new_post.id)
                 self.assertNotEqual(post.group.id, new_group.id)
 
     def _check_post_list(self, posts):
@@ -389,6 +421,8 @@ class CreateFollowTest(TestCase):
         cls.not_follower = User.objects.create(username="not_follower")
 
     def setUp(self):
+        self.guest_client = Client()
+
         self.follower_client = Client()
         self.follower_client.force_login(self.follower)
 
@@ -400,41 +434,90 @@ class CreateFollowTest(TestCase):
         super().tearDownClass()
         shutil.rmtree(TEMP_MEDIA_ROOT, ignore_errors=True)
 
-    def test_auth_user_can_follow_unfollow_author(self):
+    def test_follow_auth_user_ok(self):
         author = CreateFollowTest.author
         follower = CreateFollowTest.follower
 
-        self.assertEqual(follower.follower.count(), 0)
-        self.assertEqual(author.following.count(), 0)
-
         self.follower_client.get(
-            reverse("posts:profile_follow",
-                    kwargs={"username": author.username}))
+            reverse(
+                "posts:profile_follow",
+                kwargs={"username": author.username},
+            )
+        )
 
-        self.assertEqual(follower.follower.count(), 1)
-        self.assertEqual(author.following.count(), 1)
+        self.assertTrue(
+            Follow.objects.filter(user=follower, author=author).exists())
 
-        self.follower_client.get(
-            reverse("posts:profile_unfollow",
-                    kwargs={"username": author.username}))
-
-        self.assertEqual(follower.follower.count(), 0)
-        self.assertEqual(author.following.count(), 0)
-
-    def test_created_post_not_appears_on_not_follower_page(self):
+    def test_follow_redirect_anonymous(self):
         author = CreateFollowTest.author
+        follower = CreateFollowTest.follower
+
+        path = reverse(
+            "posts:profile_follow",
+            kwargs={"username": author.username},
+        )
+        response = self.guest_client.get(path)
+
+        self.assertRedirects(
+            response,
+            reverse("users:login") + "?next=" + path,
+        )
+        self.assertFalse(
+            Follow.objects.filter(user=follower, author=author).exists())
+
+    def test_unfollow_auth_user_ok(self):
+        author = CreateFollowTest.author
+        follower = CreateFollowTest.follower
+
+        Follow.objects.create(user=follower, author=author)
 
         self.follower_client.get(
-            reverse("posts:profile_follow",
-                    kwargs={"username": author.username}))
+            reverse(
+                "posts:profile_unfollow",
+                kwargs={"username": author.username},
+            )
+        )
 
-        Post.objects.create(author=author, text="test")
+        self.assertFalse(
+            Follow.objects.filter(user=follower, author=author).exists())
+
+    def test_unfollow_redirect_anonymous(self):
+        author = CreateFollowTest.author
+        follower = CreateFollowTest.follower
+
+        Follow.objects.create(user=follower, author=author)
+
+        path = reverse(
+            "posts:profile_unfollow",
+            kwargs={"username": author.username},
+        )
+        response = self.guest_client.get(path)
+
+        self.assertRedirects(
+            response,
+            reverse("users:login") + "?next=" + path,
+        )
+        self.assertTrue(
+            Follow.objects.filter(user=follower, author=author).exists())
+
+    def test_created_post_appears_on_follower_page(self):
+        author = CreateFollowTest.author
+        follower = CreateFollowTest.follower
+
+        Follow.objects.create(user=follower, author=author)
+        post = Post.objects.create(author=author, text="test")
 
         response = self.follower_client.get(reverse("posts:follow_index"))
         posts = response.context["page_obj"]
         self.assertEqual(len(posts), 1)
-        for post in posts:
-            self.assertEqual(author.username, post.author.username)
+        self.assertEqual(posts[0].id, post.id)
+        self.assertEqual(posts[0].author.username, author.username)
+        self.assertEqual(posts[0].text, post.text)
+
+    def test_created_post_not_appears_on_notfollower_page(self):
+        author = CreateFollowTest.author
+
+        Post.objects.create(author=author, text="test")
 
         response = self.not_follower_client.get(reverse("posts:follow_index"))
         posts = response.context["page_obj"]
