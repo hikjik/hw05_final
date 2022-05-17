@@ -417,17 +417,10 @@ class CreateFollowTest(TestCase):
     def setUpClass(cls):
         super().setUpClass()
         cls.author = User.objects.create(username="author")
-        cls.follower = User.objects.create(username="follower")
-        cls.not_follower = User.objects.create(username="not_follower")
+        cls.user = User.objects.create(username="user")
 
     def setUp(self):
         self.guest_client = Client()
-
-        self.follower_client = Client()
-        self.follower_client.force_login(self.follower)
-
-        self.not_follower_client = Client()
-        self.not_follower_client.force_login(self.not_follower)
 
     @classmethod
     def tearDownClass(cls):
@@ -435,22 +428,45 @@ class CreateFollowTest(TestCase):
         shutil.rmtree(TEMP_MEDIA_ROOT, ignore_errors=True)
 
     def test_follow_auth_user_ok(self):
+        user = CreateFollowTest.user
         author = CreateFollowTest.author
-        follower = CreateFollowTest.follower
 
-        self.follower_client.get(
+        self.assertEqual(Follow.objects.count(), 0)
+
+        auth_client = Client()
+        auth_client.force_login(user)
+        auth_client.get(
             reverse(
                 "posts:profile_follow",
                 kwargs={"username": author.username},
             )
         )
 
+        self.assertEqual(Follow.objects.count(), 1)
         self.assertTrue(
-            Follow.objects.filter(user=follower, author=author).exists())
+            Follow.objects.filter(user=user, author=author).exists())
+
+    def test_unfollow_auth_user_ok(self):
+        user = CreateFollowTest.user
+        author = CreateFollowTest.author
+
+        Follow.objects.create(user=user, author=author)
+        self.assertEqual(Follow.objects.count(), 1)
+
+        auth_client = Client()
+        auth_client.force_login(user)
+        auth_client.get(
+            reverse(
+                "posts:profile_unfollow",
+                kwargs={"username": author.username},
+            )
+        )
+
+        self.assertEqual(Follow.objects.count(), 0)
 
     def test_follow_redirect_anonymous(self):
+        user = CreateFollowTest.user
         author = CreateFollowTest.author
-        follower = CreateFollowTest.follower
 
         path = reverse(
             "posts:profile_follow",
@@ -463,29 +479,13 @@ class CreateFollowTest(TestCase):
             reverse("users:login") + "?next=" + path,
         )
         self.assertFalse(
-            Follow.objects.filter(user=follower, author=author).exists())
-
-    def test_unfollow_auth_user_ok(self):
-        author = CreateFollowTest.author
-        follower = CreateFollowTest.follower
-
-        Follow.objects.create(user=follower, author=author)
-
-        self.follower_client.get(
-            reverse(
-                "posts:profile_unfollow",
-                kwargs={"username": author.username},
-            )
-        )
-
-        self.assertFalse(
-            Follow.objects.filter(user=follower, author=author).exists())
+            Follow.objects.filter(user=user, author=author).exists())
 
     def test_unfollow_redirect_anonymous(self):
+        user = CreateFollowTest.user
         author = CreateFollowTest.author
-        follower = CreateFollowTest.follower
 
-        Follow.objects.create(user=follower, author=author)
+        Follow.objects.create(user=user, author=author)
 
         path = reverse(
             "posts:profile_unfollow",
@@ -498,27 +498,34 @@ class CreateFollowTest(TestCase):
             reverse("users:login") + "?next=" + path,
         )
         self.assertTrue(
-            Follow.objects.filter(user=follower, author=author).exists())
+            Follow.objects.filter(user=user, author=author).exists())
 
     def test_created_post_appears_on_follower_page(self):
+        user = CreateFollowTest.user
         author = CreateFollowTest.author
-        follower = CreateFollowTest.follower
 
-        Follow.objects.create(user=follower, author=author)
+        Follow.objects.create(user=user, author=author)
         post = Post.objects.create(author=author, text="test")
 
-        response = self.follower_client.get(reverse("posts:follow_index"))
+        auth_client = Client()
+        auth_client.force_login(user)
+        response = auth_client.get(reverse("posts:follow_index"))
         posts = response.context["page_obj"]
+
         self.assertEqual(len(posts), 1)
         self.assertEqual(posts[0].id, post.id)
         self.assertEqual(posts[0].author.username, author.username)
         self.assertEqual(posts[0].text, post.text)
 
     def test_created_post_not_appears_on_notfollower_page(self):
+        user = CreateFollowTest.user
         author = CreateFollowTest.author
 
         Post.objects.create(author=author, text="test")
 
-        response = self.not_follower_client.get(reverse("posts:follow_index"))
+        auth_client = Client()
+        auth_client.force_login(user)
+        response = auth_client.get(reverse("posts:follow_index"))
         posts = response.context["page_obj"]
+
         self.assertEqual(len(posts), 0)

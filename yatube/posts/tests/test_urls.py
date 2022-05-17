@@ -152,7 +152,6 @@ class PostURLTests(TestCase):
             author=author,
         )
 
-        path = f"/profile/{author.username}/unfollow/"
         response = self.auth_client.get(path, follow=True)
         self.assertEqual(response.status_code, HTTPStatus.OK)
 
